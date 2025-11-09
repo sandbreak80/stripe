@@ -1,0 +1,15 @@
+# Execution Contract
+Follow these rules before declaring success:
+- Use Docker/Compose/Make exclusively; no host Python execution.
+- Inside containers run (and capture logs for): `docker compose build`, `make lint`, `make typecheck`, `make test`, and replay Stripe webhook samples.
+- Keep migrations/webhooks idempotent; avoid destructive operations.
+- Update documentation (`docs/architecture.md`, `docs/api_reference.md`, `docs/operations.md`, `docs/SETUP.md`) when APIs or flows change.
+- Store logs and reports under `artifacts/` and reference them in evidence.
+
+## Phase: Implementation
+- All actions must comply with the execution contract.
+
+## Continuous Delivery Directive
+- Continue working the TODO board: build, deploy, test, fix, and repeat until the entire project is built and validated.
+- Do not pause or request to stop unless explicitly instructed; assume the run continues until all deliverables are complete and tests meet or exceed coverage targets (unit ≥ 85%, integration/UI ≥ 70%).
+- Start each response with a concise project status update summarizing current progress, outstanding blockers, and next planned actions.
