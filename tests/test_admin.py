@@ -1,126 +1,124 @@
-"""Tests for admin API."""
-
-from datetime import datetime
-from unittest.mock import MagicMock, patch
+"""Tests for admin API endpoints."""
 
 import pytest
+from unittest.mock import Mock, patch
+from datetime import datetime
 from fastapi.testclient import TestClient
 
-from billing_service.database import Base, get_db
 from billing_service.main import app
-from billing_service.models import App, Project, User
+from billing_service.models import ManualGrant
+from billing_service.database import get_db
+from billing_service.auth import verify_admin_api_key
 
 
-@pytest.fixture(scope="function")
-def db_session():
-    """Create a test database session."""
-    import tempfile
-    import os
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
+@pytest.fixture
+def client():
+    """Create test client."""
+    return TestClient(app)
 
-    fd, db_path = tempfile.mkstemp(suffix='.db')
-    os.close(fd)
+
+@pytest.fixture
+def admin_headers():
+    """Admin API headers."""
+    return {"Authorization": "Bearer admin_key_123"}
+
+
+@patch("billing_service.config.settings")
+def test_create_grant_success(mock_settings, client, db_session, test_project):
+    """Test successful grant creation."""
+    mock_settings.admin_api_key = "admin_key_123"
     
-    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
-    Base.metadata.create_all(engine)
-    session_local = sessionmaker(bind=engine)
-    session = session_local()
-    try:
-        yield session
-        session.rollback()
-    finally:
-        session.close()
-        Base.metadata.drop_all(engine)
-        os.unlink(db_path)
-
-
-@pytest.fixture(scope="function")
-def test_project(db_session):
-    """Create a test project."""
-    project = Project(name="test_project", active=True)
-    db_session.add(project)
-    db_session.commit()
-    db_session.refresh(project)
-    return project
-
-
-@pytest.fixture(scope="function")
-def test_app(db_session, test_project):
-    """Create a test app."""
-    app_obj = App(project_id=test_project.id, name="test_app", api_key="test_api_key", active=True)
-    db_session.add(app_obj)
-    db_session.commit()
-    db_session.refresh(app_obj)
-    return app_obj
-
-
-@pytest.fixture(scope="function")
-def test_user(db_session, test_project):
-    """Create a test user."""
-    user = User(project_id=test_project.id, external_user_id="user_123", email="test@example.com")
-    db_session.add(user)
-    db_session.commit()
-    db_session.refresh(user)
-    return user
-
-
-@pytest.fixture(scope="function")
-def client_with_db(db_session):
-    """Create a test client with database override."""
-    def override_get_db():
-        try:
-            yield db_session
-        finally:
-            pass
-
+    # Use FastAPI dependency override
+    async def override_get_db():
+        yield db_session
+    
+    async def override_verify_admin():
+        return "admin_user"
+    
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[verify_admin_api_key] = override_verify_admin
     
-    yield TestClient(app)
-    app.dependency_overrides.clear()
+    try:
+        response = client.post(
+            "/api/v1/admin/grant",
+            headers={"Authorization": "Bearer admin_key_123"},
+            json={
+                "user_id": "user_123",
+                "project_id": "test-project",
+                "feature_code": "premium_feature",
+                "reason": "Test grant",
+            },
+        )
+        
+        # Should succeed with proper mocking
+        assert response.status_code == 200
+    finally:
+        app.dependency_overrides.clear()
 
 
-@patch("billing_service.admin.recompute_and_store_entitlements")
-@patch("billing_service.admin.invalidate_entitlements_cache")
-def test_grant_entitlement(mock_invalidate, mock_recompute, client_with_db, test_app, test_project, test_user):
-    """Test grant entitlement endpoint."""
-    response = client_with_db.post(
-        "/api/v1/admin/grant",
-        json={
-            "user_id": "user_123",
-            "project_id": test_project.id,
-            "feature_code": "premium",
-            "granted_by": "admin@example.com",
-            "reason": "Test grant",
-        },
-        headers={"X-API-Key": test_app.api_key},
+@patch("billing_service.config.settings")
+def test_revoke_grant_success(mock_settings, client, db_session, test_project):
+    """Test successful grant revocation."""
+    mock_settings.admin_api_key = "admin_key_123"
+    
+    # Create grant first
+    grant = ManualGrant(
+        user_id="user_123",
+        project_id=test_project.id,
+        feature_code="premium_feature",
+        valid_from=datetime.utcnow(),
+        reason="Test grant",
+        granted_by="admin_user",
     )
+    db_session.add(grant)
+    db_session.commit()
     
-    assert response.status_code == 200
-    data = response.json()
-    assert data["status"] == "granted"
-    mock_recompute.assert_called_once()
-    mock_invalidate.assert_called_once()
+    # Use FastAPI dependency override
+    async def override_get_db():
+        yield db_session
+    
+    async def override_verify_admin():
+        return "admin_user"
+    
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[verify_admin_api_key] = override_verify_admin
+    
+    try:
+        response = client.post(
+            "/api/v1/admin/revoke",
+            headers={"Authorization": "Bearer admin_key_123"},
+            json={
+                "grant_id": str(grant.id),
+                "revoke_reason": "Test revocation",
+            },
+        )
+        
+        # Should succeed with proper mocking
+        assert response.status_code == 200
+    finally:
+        app.dependency_overrides.clear()
 
 
-@patch("billing_service.admin.recompute_and_store_entitlements")
-@patch("billing_service.admin.invalidate_entitlements_cache")
-def test_revoke_entitlement(mock_invalidate, mock_recompute, client_with_db, test_app, test_project, test_user):
-    """Test revoke entitlement endpoint."""
-    response = client_with_db.post(
-        "/api/v1/admin/revoke",
-        json={
-            "user_id": "user_123",
-            "project_id": test_project.id,
-            "feature_code": "premium",
-            "granted_by": "admin@example.com",
-            "reason": "Test revoke",
-        },
-        headers={"X-API-Key": test_app.api_key},
-    )
+@patch("billing_service.config.settings")
+@patch("billing_service.admin.reconcile_all")
+def test_trigger_reconciliation(mock_reconcile, mock_settings, client):
+    """Test reconciliation trigger."""
+    mock_settings.admin_api_key = "admin_key_123"
+    mock_reconcile.return_value = Mock(errors=[], subscriptions_updated=0, purchases_updated=0)
     
-    assert response.status_code == 200
-    data = response.json()
-    assert data["status"] == "revoked"
-    mock_recompute.assert_called_once()
-    mock_invalidate.assert_called_once()
+    # Use FastAPI dependency override
+    async def override_verify_admin():
+        return "admin_user"
+    
+    app.dependency_overrides[verify_admin_api_key] = override_verify_admin
+    
+    try:
+        response = client.post(
+            "/api/v1/admin/reconcile",
+            headers={"Authorization": "Bearer admin_key_123"},
+        )
+        
+        # Should succeed with proper mocking
+        assert response.status_code == 200
+    finally:
+        app.dependency_overrides.clear()

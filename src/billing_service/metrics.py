@@ -1,91 +1,114 @@
-"""Metrics API endpoints."""
+"""Metrics endpoints for project-level subscription and revenue data."""
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from billing_service.auth import verify_api_key
+from billing_service.auth import verify_project_api_key
 from billing_service.database import get_db
-from billing_service.models import App, Purchase, Subscription
+from billing_service.models import Price, PriceInterval, Project, Subscription, SubscriptionStatus
 
 router = APIRouter(prefix="/api/v1/metrics", tags=["metrics"])
 
 
-@router.get("/project/{project_id}/subscriptions")
-async def get_project_subscriptions(
-    project_id: int,
-    app: App = Depends(verify_api_key),
+class ProjectMetricsResponse(BaseModel):
+    """Response schema for project metrics."""
+
+    project_id: str = Field(..., description="Project identifier")
+    active_subscriptions: int = Field(..., description="Number of active subscriptions")
+    trialing_subscriptions: int = Field(..., description="Number of trialing subscriptions")
+    total_subscriptions: int = Field(..., description="Total number of subscriptions")
+    estimated_mrr_cents: int = Field(..., description="Estimated Monthly Recurring Revenue in cents")
+    estimated_mrr_dollars: float = Field(..., description="Estimated MRR in dollars")
+
+
+@router.get("/project/{project_id}", response_model=ProjectMetricsResponse)
+async def get_project_metrics(
+    project_id: str,
+    project: Project = Depends(verify_project_api_key),
     db: Session = Depends(get_db),
-) -> dict[str, int]:
-    """Get active subscription count for a project."""
-    # Verify project access
-    if app.project_id != project_id:
+) -> ProjectMetricsResponse:
+    """
+    Get metrics for a project.
+
+    Requires project API key authentication. The project_id in the path must match
+    the authenticated project.
+    """
+    # Verify project_id matches authenticated project
+    if project.project_id != project_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied to this project",
+            detail="Project ID does not match authenticated project",
         )
 
     # Count active subscriptions
     active_count = (
-        db.query(func.count(Subscription.id))
+        db.query(Subscription)
+        .join(Price, Subscription.price_id == Price.id)
         .filter(
-            Subscription.project_id == project_id,
-            Subscription.status.in_(["trialing", "active"]),
+            Subscription.project_id == project.id,
+            Subscription.status == SubscriptionStatus.ACTIVE,
         )
-        .scalar()
-        or 0
+        .count()
     )
 
+    # Count trialing subscriptions
+    trialing_count = (
+        db.query(Subscription)
+        .join(Price, Subscription.price_id == Price.id)
+        .filter(
+            Subscription.project_id == project.id,
+            Subscription.status == SubscriptionStatus.TRIALING,
+        )
+        .count()
+    )
+
+    # Total subscriptions
     total_count = (
-        db.query(func.count(Subscription.id)).filter(Subscription.project_id == project_id).scalar()
-        or 0
+        db.query(Subscription)
+        .filter(Subscription.project_id == project.id)
+        .count()
     )
 
-    return {
-        "project_id": project_id,
-        "active_subscriptions": active_count,
-        "total_subscriptions": total_count,
-    }
-
-
-@router.get("/project/{project_id}/revenue")
-async def get_project_revenue(
-    project_id: int,
-    app: App = Depends(verify_api_key),
-    db: Session = Depends(get_db),
-) -> dict[str, int | str]:
-    """Get revenue indicators for a project."""
-    # Verify project access
-    if app.project_id != project_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied to this project",
-        )
-
-    # Calculate revenue from successful purchases
-    revenue = (
-        db.query(func.sum(Purchase.amount))
+    # Calculate estimated MRR (only from active subscriptions with monthly/yearly intervals)
+    # First get monthly subscriptions
+    monthly_mrr = (
+        db.query(func.sum(Price.amount))
+        .join(Subscription, Price.id == Subscription.price_id)
         .filter(
-            Purchase.project_id == project_id,
-            Purchase.status == "succeeded",
+            Subscription.project_id == project.id,
+            Subscription.status == SubscriptionStatus.ACTIVE,
+            Price.interval == PriceInterval.MONTH,
         )
         .scalar()
-        or 0
     )
 
-    # Count successful purchases
-    purchase_count = (
-        db.query(func.count(Purchase.id))
+    estimated_mrr_cents = int(monthly_mrr) if monthly_mrr else 0
+
+    # Convert yearly subscriptions to monthly equivalent
+    yearly_mrr = (
+        db.query(func.sum(Price.amount))
+        .join(Subscription, Price.id == Subscription.price_id)
         .filter(
-            Purchase.project_id == project_id,
-            Purchase.status == "succeeded",
+            Subscription.project_id == project.id,
+            Subscription.status == SubscriptionStatus.ACTIVE,
+            Price.interval == PriceInterval.YEAR,
         )
         .scalar()
-        or 0
     )
 
-    return {
-        "project_id": project_id,
-        "total_revenue_cents": revenue,
-        "successful_purchases": purchase_count,
-    }
+    if yearly_mrr:
+        # Convert yearly to monthly (divide by 12)
+        estimated_mrr_cents += int(yearly_mrr / 12)
+
+    estimated_mrr_dollars = estimated_mrr_cents / 100.0
+
+    return ProjectMetricsResponse(
+        project_id=project_id,
+        active_subscriptions=active_count,
+        trialing_subscriptions=trialing_count,
+        total_subscriptions=total_count,
+        estimated_mrr_cents=estimated_mrr_cents,
+        estimated_mrr_dollars=estimated_mrr_dollars,
+    )

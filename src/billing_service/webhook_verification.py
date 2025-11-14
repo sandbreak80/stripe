@@ -1,43 +1,73 @@
-"""Webhook signature verification."""
-
-import hashlib
-import hmac
-
-from fastapi import Request
+"""Stripe webhook signature verification."""
 
 
-def verify_stripe_signature(payload: bytes, signature: str, secret: str) -> bool:
-    """Verify Stripe webhook signature."""
+import stripe
+from fastapi import HTTPException, Request, status
+
+from billing_service.config import settings
+
+
+def verify_stripe_signature(
+    payload: bytes,
+    signature: str,
+) -> stripe.Event | None:
+    """
+    Verify Stripe webhook signature and construct event.
+
+    Args:
+        payload: Raw request body as bytes
+        signature: Stripe-Signature header value
+
+    Returns:
+        Stripe Event object if signature is valid, None otherwise
+
+    Raises:
+        HTTPException: If signature verification fails
+    """
+    if not settings.stripe_webhook_secret:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Webhook secret not configured",
+        )
+
     try:
-        # Stripe sends signature in format: t=timestamp,v1=signature
-        # We need to extract the signature part
-        elements = signature.split(",")
-        sig_header = None
-        timestamp = None
-
-        for element in elements:
-            if element.startswith("v1="):
-                sig_header = element.split("=", 1)[1]
-            elif element.startswith("t="):
-                timestamp = element.split("=", 1)[1]
-
-        if not sig_header or not timestamp:
-            return False
-
-        # Create the signed payload
-        signed_payload = f"{timestamp}.{payload.decode('utf-8')}"
-
-        # Compute the expected signature
-        expected_sig = hmac.new(
-            secret.encode("utf-8"), signed_payload.encode("utf-8"), hashlib.sha256
-        ).hexdigest()
-
-        # Use constant-time comparison to prevent timing attacks
-        return hmac.compare_digest(expected_sig, sig_header)
-    except Exception:
-        return False
+        event = stripe.Webhook.construct_event(
+            payload,
+            signature,
+            settings.stripe_webhook_secret,
+        )
+        return event
+    except ValueError as e:
+        # Invalid payload
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid payload: {str(e)}",
+        ) from e
+    except stripe.SignatureVerificationError as e:  # type: ignore
+        # Invalid signature
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Invalid signature: {str(e)}",
+        ) from e
+    except Exception as e:
+        # Other errors
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Webhook verification error: {str(e)}",
+        ) from e
 
 
-def get_stripe_signature(request: Request) -> str | None:
-    """Extract Stripe signature from request headers."""
-    return request.headers.get("stripe-signature")
+async def get_webhook_signature(request: Request) -> str:
+    """Extract Stripe-Signature header from request."""
+    signature = request.headers.get("Stripe-Signature")
+    if not signature:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing Stripe-Signature header",
+        )
+    return signature
+
+
+async def get_webhook_payload(request: Request) -> bytes:
+    """Get raw request body as bytes for signature verification."""
+    return await request.body()

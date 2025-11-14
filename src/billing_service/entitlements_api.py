@@ -1,84 +1,92 @@
 """Entitlements API endpoints."""
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from datetime import datetime
+
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from billing_service.auth import verify_api_key
+from billing_service.auth import verify_project_api_key
 from billing_service.cache import (
-    get_entitlements_from_cache,
-    set_entitlements_in_cache,
+    cache_entitlements,
+    get_cached_entitlements,
 )
 from billing_service.database import get_db
-from billing_service.entitlements import compute_entitlements
-from billing_service.models import App, User
+from billing_service.models import Entitlement, Project
+from billing_service.schemas import EntitlementResponse, EntitlementsQueryResponse
 
-router = APIRouter(prefix="/api/v1", tags=["entitlements"])
+router = APIRouter(prefix="/api/v1/entitlements", tags=["entitlements"])
 
 
-@router.get("/entitlements")
+@router.get("", response_model=EntitlementsQueryResponse)
 async def get_entitlements(
-    user_id: str,
-    project_id: int,
-    app: App = Depends(verify_api_key),
+    user_id: str = Query(..., description="User identifier"),
+    project: Project = Depends(verify_project_api_key),
     db: Session = Depends(get_db),
-) -> dict[str, list[dict[str, str | int | None]]]:
-    """Get user entitlements for a project."""
-    # Verify project access
-    if app.project_id != project_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied to this project",
+):
+    """Get entitlements for a user in a project."""
+    # Try to get from cache first
+    cache_key_project_id = str(project.project_id)
+    cached_data = get_cached_entitlements(user_id, cache_key_project_id)
+
+    if cached_data:
+        # Return cached entitlements
+        entitlement_responses = [
+            EntitlementResponse(
+                feature_code=ent["feature_code"],
+                is_active=ent["is_active"],
+                valid_from=datetime.fromisoformat(ent["valid_from"]) if isinstance(ent["valid_from"], str) else ent["valid_from"],
+                valid_to=datetime.fromisoformat(ent["valid_to"]) if ent.get("valid_to") and isinstance(ent["valid_to"], str) else ent.get("valid_to"),
+                source=ent["source"],
+            )
+            for ent in cached_data
+        ]
+
+        return EntitlementsQueryResponse(
+            user_id=user_id,
+            project_id=cache_key_project_id,
+            entitlements=entitlement_responses,
+            checked_at=datetime.utcnow(),
         )
 
-    # Find user
-    user = (
-        db.query(User)
-        .filter(User.external_user_id == user_id, User.project_id == project_id)
-        .first()
+    # Cache miss - query database
+    entitlements = (
+        db.query(Entitlement)
+        .filter(
+            Entitlement.user_id == user_id,
+            Entitlement.project_id == project.id,
+            Entitlement.is_active == True,  # noqa: E712
+        )
+        .all()
     )
 
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found",
+    # Convert to response format
+    entitlement_responses = [
+        EntitlementResponse(
+            feature_code=str(ent.feature_code),
+            is_active=bool(ent.is_active),
+            valid_from=ent.valid_from,  # type: ignore
+            valid_to=ent.valid_to,  # type: ignore
+            source=str(ent.source.value),
         )
+        for ent in entitlements
+    ]
 
-    # Try cache first
-    cached = get_entitlements_from_cache(user.id, project_id)  # type: ignore[arg-type]
-    if cached:
-        return {"entitlements": cached}
+    # Cache the results for 5 minutes (300 seconds)
+    cache_data = [
+        {
+            "feature_code": str(ent.feature_code),
+            "is_active": bool(ent.is_active),
+            "valid_from": ent.valid_from.isoformat() if ent.valid_from else None,  # type: ignore
+            "valid_to": ent.valid_to.isoformat() if ent.valid_to else None,  # type: ignore
+            "source": str(ent.source.value),
+        }
+        for ent in entitlements
+    ]
+    cache_entitlements(user_id, cache_key_project_id, cache_data, ttl_seconds=300)
 
-    # Compute entitlements
-    entitlements = compute_entitlements(user.id, project_id, db)  # type: ignore[arg-type]
-
-    # Convert datetime objects to ISO strings for JSON serialization
-    result = []
-    for ent in entitlements:
-        valid_from_str = (
-            ent["valid_from"].isoformat()
-            if hasattr(ent["valid_from"], "isoformat")
-            else str(ent["valid_from"])
-        )
-        valid_to_str = None
-        if ent["valid_to"]:
-            valid_to_str = (
-                ent["valid_to"].isoformat()
-                if hasattr(ent["valid_to"], "isoformat")
-                else str(ent["valid_to"])
-            )
-
-        result.append(
-            {
-                "feature_code": ent["feature_code"],
-                "active": ent["active"],
-                "source": ent["source"],
-                "source_id": ent.get("source_id"),  # Handle cached entries that might not have it
-                "valid_from": valid_from_str,
-                "valid_to": valid_to_str,
-            }
-        )
-
-    # Cache the result
-    set_entitlements_in_cache(user.id, project_id, result)  # type: ignore[arg-type]
-
-    return {"entitlements": result}
+    return EntitlementsQueryResponse(
+        user_id=user_id,
+        project_id=cache_key_project_id,
+        entitlements=entitlement_responses,
+        checked_at=datetime.utcnow(),
+    )

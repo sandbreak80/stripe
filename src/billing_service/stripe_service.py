@@ -1,75 +1,58 @@
-"""Stripe service for customer, checkout, and portal operations."""
+"""Stripe service integration."""
+
+from typing import Literal
 
 import stripe
-from sqlalchemy.orm import Session
 
 from billing_service.config import settings
-from billing_service.models import StripeCustomer, User
 
 # Initialize Stripe
 stripe.api_key = settings.stripe_secret_key
 
 
-def get_or_create_stripe_customer(
-    db: Session, user: User, email: str | None = None
-) -> StripeCustomer:
-    """Get or create a Stripe customer for a user."""
-    # Check if customer already exists
-    stripe_customer = db.query(StripeCustomer).filter(StripeCustomer.user_id == user.id).first()
-
-    if stripe_customer:
-        return stripe_customer
-
-    # Create customer in Stripe
-    customer_data: dict[str, str | dict[str, str]] = {
-        "metadata": {"user_id": str(user.id), "project_id": str(user.project_id)}
-    }
-    if email:
-        customer_data["email"] = email
-
-    stripe_customer_obj = stripe.Customer.create(**customer_data)  # type: ignore[arg-type]
-
-    # Create database record
-    stripe_customer = StripeCustomer(
-        user_id=user.id,
-        stripe_customer_id=stripe_customer_obj.id,
-    )
-    db.add(stripe_customer)
-    db.commit()
-    db.refresh(stripe_customer)
-
-    return stripe_customer
-
-
 def create_checkout_session(
-    db: Session,
-    stripe_customer_id: str,
-    price_id: str,
-    mode: str,
+    price_stripe_id: str,
+    user_id: str,
+    project_id: str,
+    mode: Literal["subscription", "payment"],
     success_url: str,
     cancel_url: str,
-    project_id: int,
-) -> str:
+) -> stripe.checkout.Session:
     """Create a Stripe checkout session."""
     session = stripe.checkout.Session.create(
-        customer=stripe_customer_id,
-        line_items=[{"price": price_id, "quantity": 1}],
+        payment_method_types=["card"],
+        line_items=[
+            {
+                "price": price_stripe_id,
+                "quantity": 1,
+            }
+        ],
         mode=mode,
         success_url=success_url,
         cancel_url=cancel_url,
-        metadata={"project_id": str(project_id)},
+        metadata={
+            "user_id": user_id,
+            "project_id": project_id,
+        },
     )
-    if not session.url:
-        raise ValueError("Stripe checkout session URL is None")
-    return str(session.url)
+    return session
 
 
-def create_portal_session(stripe_customer_id: str, return_url: str) -> str:
-    """Create a Stripe customer portal session."""
+def create_portal_session(
+    customer_id: str,
+    return_url: str,
+) -> stripe.billing_portal.Session:
+    """Create a Stripe Customer Portal session."""
     session = stripe.billing_portal.Session.create(
-        customer=stripe_customer_id,
+        customer=customer_id,
         return_url=return_url,
     )
-    if not session.url:
-        raise ValueError("Stripe portal session URL is None")
-    return str(session.url)
+    return session
+
+
+def get_price(stripe_price_id: str) -> stripe.Price | None:
+    """Retrieve a Stripe price."""
+    try:
+        return stripe.Price.retrieve(stripe_price_id)
+    except stripe.StripeError:
+        return None

@@ -1,68 +1,100 @@
 """Main FastAPI application entry point."""
 
-import logging
-
 from fastapi import FastAPI
-from sqlalchemy import text
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from billing_service.admin import router as admin_router
-from billing_service.database import get_db
+from billing_service.checkout_api import router as checkout_router
 from billing_service.entitlements_api import router as entitlements_router
+
+# Register event processors
+from billing_service.event_processors import (
+    ChargeRefundedProcessor,
+    CheckoutSessionCompletedProcessor,
+    CustomerSubscriptionDeletedProcessor,
+    CustomerSubscriptionUpdatedProcessor,
+    InvoicePaymentSucceededProcessor,
+)
 from billing_service.metrics import router as metrics_router
-from billing_service.payments import router as payments_router
-from billing_service.scheduler import start_scheduler, stop_scheduler
+from billing_service.portal_api import router as portal_router
+from billing_service.prometheus_metrics import router as prometheus_router
+from billing_service.scheduler import (
+    start_reconciliation_scheduler,
+    stop_reconciliation_scheduler,
+)
+from billing_service.schemas import HealthResponse
+from billing_service.webhook_processors import event_router
 from billing_service.webhooks import router as webhooks_router
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Register processors
+event_router.register_processor(CheckoutSessionCompletedProcessor())
+event_router.register_processor(InvoicePaymentSucceededProcessor())
+event_router.register_processor(CustomerSubscriptionUpdatedProcessor())
+event_router.register_processor(CustomerSubscriptionDeletedProcessor())
+event_router.register_processor(ChargeRefundedProcessor())
 
 app = FastAPI(
     title="Billing Service",
-    description="Centralized Billing & Entitlements Service for Micro-Applications",
+    description="Centralized Billing & Entitlements Service",
     version="0.1.0",
 )
 
-app.include_router(payments_router)
-app.include_router(webhooks_router)
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Configure appropriately for production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Include routers
+app.include_router(checkout_router)
 app.include_router(entitlements_router)
+app.include_router(portal_router)
+app.include_router(webhooks_router)
 app.include_router(admin_router)
 app.include_router(metrics_router)
+app.include_router(prometheus_router)
 
 
+@app.get("/healthz", response_model=HealthResponse)
+async def health_check() -> HealthResponse:
+    """Health check endpoint."""
+    return HealthResponse(status="healthy")
+
+
+@app.get("/ready", response_model=HealthResponse)
+async def readiness_check() -> HealthResponse | JSONResponse:
+    """Readiness check endpoint."""
+    from billing_service.database import check_db_connection
+
+    if not check_db_connection():
+        from fastapi import status
+
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"status": "not ready"},
+        )
+
+    return HealthResponse(status="ready")
+
+
+@app.get("/live", response_model=HealthResponse)
+async def liveness_check() -> HealthResponse:
+    """Liveness check endpoint."""
+    return HealthResponse(status="alive")
+
+
+# Start reconciliation scheduler on startup
 @app.on_event("startup")
 async def startup_event() -> None:
-    """Startup event handler."""
-    logger.info("Starting Billing Service...")
-    start_scheduler()
+    """Start background tasks on application startup."""
+    start_reconciliation_scheduler()
 
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
-    """Shutdown event handler."""
-    logger.info("Shutting down Billing Service...")
-    stop_scheduler()
-
-
-@app.get("/health")
-async def health() -> dict[str, str]:
-    """Health check endpoint."""
-    return {"status": "ok"}
-
-
-@app.get("/ready")
-async def ready() -> dict[str, str]:
-    """Readiness check endpoint - verifies database connectivity."""
-    try:
-        db = next(get_db())
-        # Verify database connectivity
-        db.execute(text("SELECT 1"))
-        db.close()
-        return {"status": "ready"}
-    except Exception:
-        return {"status": "not_ready"}
-
-
-@app.get("/live")
-async def live() -> dict[str, str]:
-    """Liveness check endpoint."""
-    return {"status": "alive"}
+    """Cleanup on application shutdown."""
+    stop_reconciliation_scheduler()

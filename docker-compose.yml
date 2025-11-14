@@ -1,52 +1,71 @@
 services:
-  db:
-    image: postgres:15-alpine
-    environment:
-      POSTGRES_USER: billing_user
-      POSTGRES_PASSWORD: billing_pass
-      POSTGRES_DB: billing_db
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U billing_user"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-
   app:
     build:
       context: .
       dockerfile: Dockerfile
-    environment:
-      DATABASE_URL: postgresql://billing_user:billing_pass@db:5432/billing_db
-      REDIS_URL: redis://redis:6379/0
-      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-sk_test_placeholder}
-      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-whsec_placeholder}
-      ENVIRONMENT: ${ENVIRONMENT:-development}
+    container_name: billing-service-app
     ports:
-      - "8000:8000"
+      - "${APP_HOST_PORT:-8000}:8000"
+    environment:
+      - DATABASE_URL=postgresql://billing_user:billing_pass@postgres:5432/billing_db
+      - REDIS_URL=redis://redis:6379/0
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
+      - ADMIN_API_KEY=${ADMIN_API_KEY:-}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
     depends_on:
-      db:
+      postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     volumes:
       - ./src:/app/src
-      - ./artifacts:/app/artifacts
       - ./alembic:/app/alembic
-    command: uvicorn billing_service.main:app --host 0.0.0.0 --port 8000 --reload
+      - ./artifacts:/app/artifacts
+    networks:
+      - billing-network
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: billing-service-postgres
+    environment:
+      - POSTGRES_USER=billing_user
+      - POSTGRES_PASSWORD=billing_pass
+      - POSTGRES_DB=billing_db
+    ports:
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - billing-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U billing_user -d billing_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: billing-service-redis
+    ports:
+      - "${REDIS_HOST_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - billing-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
 
 volumes:
   postgres_data:
+  redis_data:
+
+networks:
+  billing-network:
+    driver: bridge

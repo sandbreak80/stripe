@@ -1,61 +1,45 @@
-.PHONY: build lint typecheck test up down clean logs shell lint-internal typecheck-internal test-internal
+.PHONY: help build up down logs lint typecheck test clean migrate shell
 
-# Build Docker images
+help:
+	@echo "Available targets:"
+	@echo "  build       - Build Docker images"
+	@echo "  up          - Start all services"
+	@echo "  down        - Stop all services"
+	@echo "  logs        - Show service logs"
+	@echo "  lint        - Run ruff linter"
+	@echo "  typecheck   - Run mypy type checker"
+	@echo "  test        - Run pytest tests"
+	@echo "  migrate     - Run database migrations"
+	@echo "  shell       - Open shell in app container"
+	@echo "  clean       - Remove containers and volumes"
+
 build:
 	docker compose build
 
-# Run linting (host)
-lint:
-	docker compose run --rm app make lint-internal
-
-# Run linting (container)
-lint-internal:
-	poetry run ruff check --fix src/ tests/ || true
-	poetry run ruff format src/ tests/ || true
-	poetry run ruff check src/ tests/ || true
-	poetry run ruff format --check src/ tests/ || true
-
-# Run type checking (host)
-typecheck:
-	docker compose run --rm app make typecheck-internal
-
-# Run type checking (container)
-typecheck-internal:
-	poetry run mypy src/
-
-# Run tests (host)
-test:
-	docker compose run --rm app make test-internal
-
-# Run tests (container)
-test-internal:
-	poetry run pytest tests/ -v --cov=src --cov-report=html --cov-report=term --cov-report=json:artifacts/coverage.json
-
-# Start services
 up:
 	docker compose up -d
 
-# Stop services
 down:
 	docker compose down
 
-# Clean up containers and volumes
-clean:
-	docker compose down -v
-	docker compose rm -f
-
-# View logs
 logs:
 	docker compose logs -f app
 
-# Shell into app container
-shell:
-	docker compose exec app bash
+lint:
+	docker compose exec -T app python -m ruff check src/ tests/
 
-# Run migrations
+typecheck:
+	docker compose exec -T app python -m mypy src/
+
+test:
+	docker compose exec -T app pytest tests/ -v --cov=src/billing_service --cov-report=html --cov-report=term --cov-report=json:artifacts/coverage.json
+
 migrate:
-	docker compose run --rm app poetry run alembic upgrade head
+	docker compose exec app alembic upgrade head
 
-# Create new migration
-migration:
-	docker compose run --rm app poetry run alembic revision --autogenerate -m "$(msg)"
+shell:
+	docker compose exec app /bin/bash
+
+clean:
+	docker compose down -v
+	docker compose rm -f

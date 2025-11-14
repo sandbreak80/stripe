@@ -1,267 +1,330 @@
 # Operations Guide
 
-## Environment Setup
+**Version:** 1.0  
+**Last Updated:** November 11, 2025  
+**Service:** Centralized Billing & Entitlements Service
 
-### Required Environment Variables
+## Overview
 
-- `DATABASE_URL`: PostgreSQL connection string (e.g., `postgresql://user:pass@db:5432/billing`)
-- `REDIS_URL`: Redis connection string (e.g., `redis://redis:6379/0`)
-- `STRIPE_SECRET_KEY`: Stripe secret API key
-- `STRIPE_WEBHOOK_SECRET`: Stripe webhook signing secret
+This guide covers operational procedures for running, monitoring, and troubleshooting the Billing Service.
 
-### Docker Compose Services
+## Deployment
 
-- `app`: Main application service
-- `db`: PostgreSQL database
-- `redis`: Redis cache (for future use)
+### Prerequisites
 
-## Running the Service
+- Docker and Docker Compose installed
+- PostgreSQL 15+ database
+- Redis 7+ instance
+- Stripe account with API keys
 
-### Development
+### Environment Variables
+
+Create a `.env` file with the following variables:
 
 ```bash
-# Build containers
+# Database
+DATABASE_URL=postgresql://billing_user:billing_pass@postgres:5432/billing_db
+
+# Redis
+REDIS_URL=redis://redis:6379/0
+
+# Stripe
+STRIPE_SECRET_KEY=sk_test_...
+STRIPE_PUBLISHABLE_KEY=pk_test_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+
+# API Keys
+ADMIN_API_KEY=admin_key_here
+```
+
+### Starting the Service
+
+```bash
+# Build images
 docker compose build
 
 # Start services
 docker compose up -d
 
 # Run migrations
-docker compose run --rm app make migrate
+docker compose exec app alembic upgrade head
 
-# View logs
+# Check logs
 docker compose logs -f app
 ```
 
-### Production
-
-1. Set environment variables in production environment
-2. Build Docker image: `docker compose build app`
-3. Deploy to container orchestration platform
-4. Run migrations: `docker compose run --rm app make migrate`
-5. Start services: `docker compose up -d`
-
-## Scheduled Reconciliation
-
-The service includes built-in automated reconciliation scheduling using APScheduler. Reconciliation runs daily to detect and correct data drift between Stripe and the local database.
-
-### Configuration
-
-Configure reconciliation via environment variables:
-
-- `RECONCILIATION_ENABLED`: Enable/disable scheduled reconciliation (default: `true`)
-- `RECONCILIATION_SCHEDULE_HOUR`: Hour of day to run reconciliation in UTC (default: `2`)
-- `RECONCILIATION_DAYS_BACK`: Number of days to look back when reconciling (default: `7`)
-
-### Manual Reconciliation
-
-Reconciliation can also be triggered manually via the reconciliation API endpoints (if implemented) or by calling the reconciliation functions directly.
-
-### Monitoring Reconciliation
-
-Check application logs for reconciliation execution:
+### Stopping the Service
 
 ```bash
-docker compose logs app | grep -i reconciliation
-```
-
-Reconciliation logs include:
-- Start time
-- Number of subscriptions and purchases checked
-- Number of drift issues detected and corrected
-- Any errors encountered
-
-## Database Migrations
-
-### Create Migration
-
-```bash
-docker compose run --rm app make migration MESSAGE="description"
-```
-
-### Apply Migrations
-
-```bash
-docker compose run --rm app make migrate
-```
-
-### Rollback Migration
-
-```bash
-docker compose run --rm app poetry run alembic downgrade -1
+docker compose down
 ```
 
 ## Monitoring
 
 ### Health Checks
 
-- `/health`: Basic health check
-- `/ready`: Readiness check (checks database connectivity)
-- `/live`: Liveness check
+The service provides three health check endpoints:
 
-### Logs
+- `/healthz`: Basic health check (always returns 200 if service is running)
+- `/ready`: Readiness check (verifies database connectivity)
+- `/live`: Liveness check (always returns 200)
 
-Application logs are written to stdout/stderr. In Docker:
+Configure your load balancer to use `/ready` for health checks.
+
+### Logging
+
+Logs are written to stdout/stderr and can be viewed via:
 
 ```bash
 docker compose logs -f app
 ```
 
+Log levels:
+- `INFO`: Normal operations
+- `WARNING`: Non-critical issues
+- `ERROR`: Errors requiring attention
+- `CRITICAL`: Critical failures
+
 ### Metrics
 
-The service exposes basic metrics endpoints:
+Currently, basic metrics are available via health endpoints. Future versions will include Prometheus metrics export.
 
-- `GET /api/v1/metrics/project/{project_id}/subscriptions`: Active subscription count
-- `GET /api/v1/metrics/project/{project_id}/revenue`: Total revenue from successful purchases
+## Database Operations
 
-These endpoints require API key authentication and project authorization.
-
-## Webhook Configuration
-
-### Stripe Webhook Setup
-
-1. In Stripe Dashboard, go to Developers > Webhooks
-2. Add endpoint: `https://your-domain.com/api/v1/webhooks/stripe`
-3. Select events to listen for:
-   - `checkout.session.completed`
-   - `payment_intent.succeeded`
-   - `payment_intent.payment_failed`
-   - `customer.subscription.created`
-   - `customer.subscription.updated`
-   - `customer.subscription.deleted`
-   - `invoice.payment_succeeded`
-   - `invoice.payment_failed`
-   - `charge.refunded`
-4. Copy webhook signing secret to `STRIPE_WEBHOOK_SECRET` environment variable
-
-### Testing Webhooks Locally
-
-Use Stripe CLI to forward webhooks:
+### Running Migrations
 
 ```bash
-stripe listen --forward-to http://localhost:8000/api/v1/webhooks/stripe
+# Create a new migration
+docker compose exec app alembic revision --autogenerate -m "description"
+
+# Apply migrations
+docker compose exec app alembic upgrade head
+
+# Rollback one migration
+docker compose exec app alembic downgrade -1
+
+# Rollback to specific revision
+docker compose exec app alembic downgrade <revision>
 ```
-
-## Troubleshooting
-
-### Webhook Events Not Processing
-
-1. Check webhook signature verification: Ensure `STRIPE_WEBHOOK_SECRET` matches Stripe dashboard
-2. Check database: Verify events are being stored in `webhook_events` table
-3. Check logs: Look for error messages in `error_message` column
-4. Retry failed events: Manually trigger reprocessing if needed
-
-### Database Connection Issues
-
-1. Verify `DATABASE_URL` is correct
-2. Check database is running: `docker compose ps db`
-3. Check database logs: `docker compose logs db`
-
-### API Key Issues
-
-1. Verify API key exists in `apps` table
-2. Check API key is active (`active = true`)
-3. Verify API key matches project ID in request
-
-## Backup and Recovery
 
 ### Database Backup
 
 ```bash
-docker compose exec db pg_dump -U postgres billing > backup.sql
+# Backup database
+docker compose exec postgres pg_dump -U billing_user billing_db > backup.sql
+
+# Restore database
+docker compose exec -T postgres psql -U billing_user billing_db < backup.sql
 ```
 
-### Database Restore
+### Database Maintenance
 
 ```bash
-docker compose exec -T db psql -U postgres billing < backup.sql
+# Connect to database
+docker compose exec postgres psql -U billing_user billing_db
+
+# Check table sizes
+SELECT 
+    schemaname,
+    tablename,
+    pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) AS size
+FROM pg_tables
+WHERE schemaname = 'public'
+ORDER BY pg_total_relation_size(schemaname||'.'||tablename) DESC;
 ```
+
+## Cache Operations
+
+### Redis Connection
+
+```bash
+# Connect to Redis
+docker compose exec redis redis-cli
+
+# Check cache keys
+docker compose exec redis redis-cli KEYS "entitlements:*"
+docker compose exec redis redis-cli KEYS "webhook:*"
+
+# Clear all cache
+docker compose exec redis redis-cli FLUSHDB
+
+# Check Redis memory usage
+docker compose exec redis redis-cli INFO memory
+```
+
+### Cache Invalidation
+
+Cache is automatically invalidated when entitlements change. To manually invalidate:
+
+```bash
+# Invalidate specific user's entitlements
+docker compose exec redis redis-cli DEL "entitlements:user_123:project_456"
+
+# Invalidate all entitlements for a project
+docker compose exec redis redis-cli --scan --pattern "entitlements:*:project_456" | xargs redis-cli DEL
+```
+
+## Troubleshooting
+
+### Service Won't Start
+
+1. Check Docker logs: `docker compose logs app`
+2. Verify environment variables: `docker compose exec app env | grep -E "(DATABASE|REDIS|STRIPE)"`
+3. Check database connectivity: `docker compose exec app python -c "from billing_service.database import check_db_connection; print(check_db_connection())"`
+4. Verify Redis connectivity: `docker compose exec redis redis-cli PING`
+
+### Database Connection Issues
+
+1. Verify PostgreSQL is running: `docker compose ps postgres`
+2. Check database credentials in `.env`
+3. Test connection: `docker compose exec postgres psql -U billing_user billing_db -c "SELECT 1"`
+4. Check database logs: `docker compose logs postgres`
+
+### Webhook Processing Issues
+
+1. Check webhook logs: `docker compose logs app | grep webhook`
+2. Verify webhook secret matches Stripe Dashboard
+3. Check event deduplication: `docker compose exec redis redis-cli KEYS "webhook:*"`
+4. Review Stripe Dashboard for webhook delivery status
+
+### Entitlements Not Updating
+
+1. Check if webhooks are being received: `docker compose logs app | grep "checkout.session.completed"`
+2. Verify entitlements computation: Query `entitlements` table directly
+3. Check cache: `docker compose exec redis redis-cli GET "entitlements:user_123:project_456"`
+4. Manually recompute entitlements (requires admin API):
+   ```python
+   from billing_service.entitlements import recompute_and_store_entitlements
+   recompute_and_store_entitlements(db, "user_123", project_id)
+   ```
+
+### High Database Load
+
+1. Check active connections: `docker compose exec postgres psql -U billing_user billing_db -c "SELECT count(*) FROM pg_stat_activity"`
+2. Review slow queries: Enable `log_min_duration_statement` in PostgreSQL
+3. Check cache hit rate: Monitor Redis cache usage
+4. Consider increasing connection pool size in `database.py`
+
+## Maintenance Tasks
+
+### Daily Tasks
+
+- Monitor health check endpoints
+- Review error logs for anomalies
+- Check Stripe webhook delivery status
+
+### Weekly Tasks
+
+- Review database size and growth
+- Check Redis memory usage
+- Review slow query logs
+- Verify backup procedures
+
+### Monthly Tasks
+
+- Run database VACUUM ANALYZE
+- Review and optimize indexes
+- Audit API key usage
+- Review security logs
 
 ## Scaling
 
 ### Horizontal Scaling
 
-The service is stateless and can be scaled horizontally:
-- Run multiple instances behind a load balancer
-- Ensure all instances share the same database
-- Webhook endpoints should be accessible from Stripe
+The API layer is stateless and can be scaled horizontally:
+
+1. Run multiple app containers behind a load balancer
+2. Ensure all containers share the same database and Redis instance
+3. Configure load balancer health checks to use `/ready` endpoint
 
 ### Database Scaling
 
 - Use read replicas for read-heavy workloads
 - Consider connection pooling (PgBouncer) for high connection counts
+- Monitor query performance and optimize slow queries
+
+### Cache Scaling
+
+- Use Redis Cluster for high availability
+- Configure appropriate memory limits
+- Monitor cache hit rates
 
 ## Security
 
-### API Keys
+### API Key Management
 
-- Rotate API keys regularly
-- Use strong, randomly generated keys
-- Store keys securely (environment variables, secrets manager)
+- Rotate API keys periodically
+- Use different keys for different environments
+- Never commit API keys to version control
+- Use environment variables or secret management systems
+
+### Database Security
+
+- Use strong passwords
+- Restrict network access to database
+- Enable SSL/TLS for database connections
+- Regularly update PostgreSQL
 
 ### Webhook Security
 
 - Always verify webhook signatures
 - Use HTTPS for webhook endpoints
+- Rotate webhook secrets if compromised
 - Monitor for suspicious webhook activity
 
-### Database Security
+## Disaster Recovery
 
-- Use strong database passwords
-- Restrict database access to application only
-- Enable SSL/TLS for database connections in production
+### Backup Strategy
 
-## Maintenance
+1. **Database Backups**: Daily automated backups, retain 30 days
+2. **Configuration**: Version control for all configuration files
+3. **Secrets**: Store in secure secret management system
 
-### Regular Tasks
+### Recovery Procedures
 
-1. Monitor webhook processing failures
-2. Review and clean up old webhook events (if needed)
-3. Monitor database size and performance
-4. Review application logs for errors
-5. Update dependencies regularly
+1. **Database Recovery**:
+   ```bash
+   # Stop service
+   docker compose down
+   
+   # Restore database
+   docker compose exec -T postgres psql -U billing_user billing_db < backup.sql
+   
+   # Restart service
+   docker compose up -d
+   ```
 
-### Reconciliation
+2. **Cache Recovery**: Cache will repopulate automatically from database queries
 
-The reconciliation system (`src/billing_service/reconciliation.py`) automatically detects and corrects data drift between Stripe and local database.
+3. **Stripe Reconciliation**: Run reconciliation job to sync with Stripe if needed
 
-**Running Reconciliation:**
+## Performance Tuning
 
-```bash
-# Run reconciliation manually (inside container)
-docker compose run --rm app poetry run python -c "
-from billing_service.database import get_db
-from billing_service.reconciliation import reconcile_all
-db = next(get_db())
-result = reconcile_all(db, days_back=7)
-print(result)
-"
-```
+### Database Optimization
 
-**Scheduling Reconciliation:**
+- Add indexes for frequently queried columns
+- Use connection pooling
+- Monitor query performance
+- Consider partitioning large tables
 
-Set up a cron job or scheduled task to run reconciliation daily:
+### Cache Optimization
 
-```bash
-# Example cron entry (runs daily at 2 AM)
-0 2 * * * cd /path/to/stripe && docker compose run --rm app poetry run python -c "from billing_service.database import get_db; from billing_service.reconciliation import reconcile_all; db = next(get_db()); reconcile_all(db, days_back=7)"
-```
+- Adjust cache TTL based on usage patterns
+- Monitor cache hit rates
+- Use appropriate Redis eviction policies
 
-**Reconciliation Process:**
+### Application Optimization
 
-1. Queries Stripe for recent subscriptions (last 7 days by default)
-2. Compares subscription status and period end with local records
-3. Queries Stripe for recent purchases (last 7 days by default)
-4. Compares purchase status with local records
-5. Updates local records to match Stripe when drift detected
-6. Recomputes entitlements for affected users
-7. Invalidates cache for affected users
-8. Returns summary with drift counts
+- Enable gzip compression
+- Use CDN for static assets (if applicable)
+- Monitor response times
+- Profile slow endpoints
 
-**Monitoring Reconciliation:**
+## Support
 
-Check logs for reconciliation results:
-- `subscriptions_checked`: Number of subscriptions verified
-- `purchases_checked`: Number of purchases verified
-- `drift_detected`: Number of discrepancies found
-- `corrected`: Number of records corrected
+For issues or questions:
+
+1. Check logs: `docker compose logs app`
+2. Review this operations guide
+3. Check Stripe Dashboard for payment issues
+4. Contact support team with relevant logs and error messages

@@ -1,14 +1,22 @@
 # Setup Guide
 
+**Version:** 1.0  
+**Last Updated:** November 11, 2025  
+**Service:** Centralized Billing & Entitlements Service
+
 ## Prerequisites
 
-- Docker and Docker Compose installed
-- Stripe account with API keys
-- Basic knowledge of PostgreSQL
+Before setting up the Billing Service, ensure you have:
 
-## Initial Setup
+- **Docker** 20.10+ and **Docker Compose** 2.0+
+- **Stripe Account** with API keys (test mode keys are fine for development)
+- **PostgreSQL** 15+ (or use Docker container)
+- **Redis** 7+ (or use Docker container)
+- **Git** (for cloning the repository)
 
-### 1. Clone Repository
+## Quick Start
+
+### 1. Clone the Repository
 
 ```bash
 git clone <repository-url>
@@ -17,47 +25,144 @@ cd stripe
 
 ### 2. Configure Environment Variables
 
-Create a `.env` file in the project root:
+Copy the example environment file and edit it:
 
 ```bash
-DATABASE_URL=postgresql://postgres:postgres@db:5432/billing
-REDIS_URL=redis://redis:6379/0
-STRIPE_SECRET_KEY=sk_test_...
-STRIPE_WEBHOOK_SECRET=whsec_...
-RECONCILIATION_ENABLED=true
-RECONCILIATION_SCHEDULE_HOUR=2
-RECONCILIATION_DAYS_BACK=7
+cp .env.example .env
 ```
 
-Replace with your actual Stripe keys.
+Edit `.env` and set the following variables:
+
+```bash
+# Database (defaults work for Docker Compose)
+DATABASE_URL=postgresql://billing_user:billing_pass@postgres:5432/billing_db
+
+# Redis (defaults work for Docker Compose)
+REDIS_URL=redis://redis:6379/0
+
+# Stripe - Get these from https://dashboard.stripe.com/test/apikeys
+STRIPE_SECRET_KEY=sk_test_...
+STRIPE_PUBLISHABLE_KEY=pk_test_...
+STRIPE_WEBHOOK_SECRET=whsec_...  # Get from Stripe Dashboard > Webhooks
+
+# Admin API Key (change in production!)
+ADMIN_API_KEY=admin_key_change_in_production
+```
 
 ### 3. Build and Start Services
 
 ```bash
 # Build Docker images
-docker compose build
+make build
 
-# Start services
-docker compose up -d
+# Start all services (PostgreSQL, Redis, App)
+make up
 
-# Verify services are running
+# Run database migrations
+make migrate
+
+# Check service status
 docker compose ps
 ```
 
-### 4. Run Database Migrations
-
-```bash
-docker compose run --rm app make migrate
-```
-
-### 5. Verify Installation
+### 4. Verify Installation
 
 ```bash
 # Check health endpoint
-curl http://localhost:8000/health
+curl http://localhost:8000/healthz
 
-# Should return: {"status":"ok"}
+# Should return: {"status":"healthy"}
+
+# Check readiness (requires database)
+curl http://localhost:8000/ready
+
+# Should return: {"status":"ready"}
 ```
+
+### 5. View Logs
+
+```bash
+# View all logs
+make logs
+
+# View specific service logs
+docker compose logs -f app
+docker compose logs -f postgres
+docker compose logs -f redis
+```
+
+## Stripe Configuration
+
+### 1. Get Stripe API Keys
+
+1. Go to [Stripe Dashboard](https://dashboard.stripe.com/test/apikeys)
+2. Copy your **Secret key** (`sk_test_...`)
+3. Copy your **Publishable key** (`pk_test_...`)
+4. Add them to your `.env` file
+
+### 2. Configure Webhooks
+
+1. Go to [Stripe Dashboard > Webhooks](https://dashboard.stripe.com/test/webhooks)
+2. Click "Add endpoint"
+3. Set endpoint URL to: `http://localhost:8000/api/v1/webhooks/stripe` (for local development)
+4. Select events to listen for:
+   - `checkout.session.completed`
+   - `invoice.payment_succeeded`
+   - `customer.subscription.updated`
+   - `customer.subscription.deleted`
+   - `charge.refunded`
+5. Copy the **Signing secret** (`whsec_...`) and add it to your `.env` file
+
+**Note:** For local development, use [Stripe CLI](https://stripe.com/docs/stripe-cli) to forward webhooks:
+
+```bash
+stripe listen --forward-to localhost:8000/api/v1/webhooks/stripe
+```
+
+## Database Setup
+
+### Initial Migration
+
+The database schema is managed by Alembic. Run migrations to create tables:
+
+```bash
+make migrate
+```
+
+This will create all necessary tables:
+- `projects`
+- `products`
+- `prices`
+- `subscriptions`
+- `purchases`
+- `manual_grants`
+- `entitlements`
+
+### Create a Test Project
+
+You'll need to create a project before using the API. Connect to the database:
+
+```bash
+docker compose exec postgres psql -U billing_user billing_db
+```
+
+Then insert a test project (replace `your_api_key` with a secure key):
+
+```sql
+INSERT INTO projects (id, project_id, name, description, api_key_hash, is_active, created_at, updated_at)
+VALUES (
+    gen_random_uuid(),
+    'test-project',
+    'Test Project',
+    'Test project description',
+    encode(digest('your_api_key', 'sha256'), 'hex'),
+    true,
+    NOW(),
+    NOW()
+);
+```
+
+**Note:** The API key hash is SHA-256 of the plain API key. You'll use the plain key in API requests.
 
 ## Development Workflow
 
@@ -65,163 +170,213 @@ curl http://localhost:8000/health
 
 ```bash
 # Run all tests
-docker compose run --rm app make test
+make test
 
 # Run specific test file
-docker compose run --rm app poetry run pytest tests/test_webhooks.py
+docker compose exec app pytest tests/test_entitlements.py -v
 
 # Run with coverage
-docker compose run --rm app poetry run pytest --cov=src --cov-report=html
+docker compose exec app pytest tests/ -v --cov=src/billing_service --cov-report=term
 ```
 
 ### Linting and Type Checking
 
 ```bash
 # Run linter
-docker compose run --rm app make lint
+make lint
+
+# Auto-fix linting issues
+docker compose exec app python -m ruff check --fix src/ tests/
 
 # Run type checker
-docker compose run --rm app make typecheck
-
-# Run both
-docker compose run --rm app make lint typecheck
+make typecheck
 ```
 
-### Accessing Database
+### Creating Database Migrations
+
+```bash
+# Create a new migration
+docker compose exec app alembic revision --autogenerate -m "description"
+
+# Review the generated migration file
+# Then apply it
+make migrate
+```
+
+### Accessing the Shell
+
+```bash
+# Open shell in app container
+make shell
+
+# Or directly
+docker compose exec app /bin/bash
+```
+
+## Project Structure
+
+```
+.
+├── alembic/              # Database migrations
+│   ├── versions/         # Migration files
+│   └── env.py            # Alembic configuration
+├── artifacts/            # Build logs, test reports
+├── docs/                 # Documentation
+│   ├── architecture.md
+│   ├── api_reference.md
+│   ├── operations.md
+│   └── SETUP.md
+├── src/
+│   └── billing_service/  # Main application code
+│       ├── __init__.py
+│       ├── auth.py       # Authentication
+│       ├── cache.py       # Redis caching
+│       ├── checkout_api.py
+│       ├── config.py     # Configuration
+│       ├── database.py   # Database connection
+│       ├── entitlements.py # Entitlements computation
+│       ├── entitlements_api.py
+│       ├── event_processors.py
+│       ├── main.py       # FastAPI app
+│       ├── models.py     # SQLAlchemy models
+│       ├── portal_api.py
+│       ├── schemas.py    # Pydantic schemas
+│       ├── stripe_service.py
+│       ├── webhook_processors.py
+│       ├── webhook_verification.py
+│       └── webhooks.py
+├── tests/                # Test suite
+│   ├── conftest.py
+│   ├── test_api.py
+│   ├── test_auth.py
+│   ├── test_cache.py
+│   ├── test_entitlements.py
+│   └── test_webhook_verification.py
+├── .env.example          # Example environment variables
+├── .gitignore
+├── Dockerfile            # Docker image definition
+├── docker-compose.yml    # Docker Compose configuration
+├── Makefile             # Build automation
+├── pyproject.toml       # Python project configuration
+└── README.md
+```
+
+## Common Tasks
+
+### Starting Fresh
+
+```bash
+# Stop and remove all containers and volumes
+make clean
+
+# Rebuild and start
+make build
+make up
+make migrate
+```
+
+### Resetting Database
+
+```bash
+# Drop and recreate database
+docker compose exec postgres psql -U billing_user -c "DROP DATABASE billing_db;"
+docker compose exec postgres psql -U billing_user -c "CREATE DATABASE billing_db;"
+
+# Run migrations
+make migrate
+```
+
+### Viewing Database
 
 ```bash
 # Connect to PostgreSQL
-docker compose exec db psql -U postgres billing
+docker compose exec postgres psql -U billing_user billing_db
 
-# Or use a GUI tool connecting to:
-# Host: localhost
-# Port: 5432
-# Database: billing
-# User: postgres
-# Password: postgres
+# List tables
+\dt
+
+# Query projects
+SELECT * FROM projects;
+
+# Query entitlements
+SELECT * FROM entitlements LIMIT 10;
 ```
 
-### Accessing Application Shell
-
-```bash
-docker compose run --rm app make shell
-```
-
-## Creating Test Data
-
-### Create a Project
-
-```sql
-INSERT INTO projects (name, active) VALUES ('test_project', true);
-```
-
-### Create an App
-
-```sql
-INSERT INTO apps (project_id, name, api_key, active)
-VALUES (1, 'test_app', 'test_api_key_123', true);
-```
-
-### Create a User
-
-```sql
-INSERT INTO users (project_id, external_user_id, email)
-VALUES (1, 'user_123', 'user@example.com');
-```
-
-## Testing Stripe Integration
-
-### Test Mode
-
-The service uses Stripe test mode by default. Use test API keys:
-- Test secret key: `sk_test_...`
-- Test webhook secret: `whsec_test_...`
-
-### Test Cards
-
-Use Stripe test cards:
-- Success: `4242 4242 4242 4242`
-- Decline: `4000 0000 0000 0002`
-- 3D Secure: `4000 0025 0000 3155`
-
-### Testing Webhooks Locally
-
-1. Install Stripe CLI: https://stripe.com/docs/stripe-cli
-2. Login: `stripe login`
-3. Forward webhooks: `stripe listen --forward-to http://localhost:8000/api/v1/webhooks/stripe`
-4. Trigger test events: `stripe trigger payment_intent.succeeded`
-
-## API Testing
-
-### Create Checkout Session
-
-```bash
-curl -X POST http://localhost:8000/api/v1/checkout/session \
-  -H "X-API-Key: test_api_key_123" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "user_id": "user_123",
-    "project_id": 1,
-    "price_id": "price_test123",
-    "mode": "payment",
-    "success_url": "https://example.com/success",
-    "cancel_url": "https://example.com/cancel"
-  }'
-```
-
-### Create Portal Session
-
-```bash
-curl -X POST http://localhost:8000/api/v1/portal/session \
-  -H "X-API-Key: test_api_key_123" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "user_id": "user_123",
-    "project_id": 1,
-    "return_url": "https://example.com/billing"
-  }'
-```
-
-## Common Issues
+## Troubleshooting
 
 ### Port Already in Use
 
-If port 8000 is already in use, modify `docker-compose.yml`:
+If port 8000 is already in use:
 
-```yaml
-ports:
-  - "8001:8000"  # Change 8001 to any available port
+```bash
+# Find process using port 8000
+lsof -i :8000
+
+# Kill the process or change port in docker-compose.yml
 ```
 
 ### Database Connection Errors
 
-1. Ensure database service is running: `docker compose ps db`
-2. Check database logs: `docker compose logs db`
-3. Verify `DATABASE_URL` in `.env` file
+```bash
+# Check if PostgreSQL is running
+docker compose ps postgres
 
-### Migration Errors
+# Check database logs
+docker compose logs postgres
 
-1. Check database is accessible
-2. Verify Alembic configuration in `alembic.ini`
-3. Check migration files in `alembic/versions/`
+# Test connection
+docker compose exec postgres psql -U billing_user billing_db -c "SELECT 1"
+```
 
-### Webhook Signature Verification Fails
+### Redis Connection Errors
 
-1. Verify `STRIPE_WEBHOOK_SECRET` matches Stripe dashboard
-2. Ensure webhook endpoint is accessible from Stripe
-3. Check webhook signature format in logs
+```bash
+# Check if Redis is running
+docker compose ps redis
+
+# Test Redis connection
+docker compose exec redis redis-cli PING
+```
+
+### Webhook Not Receiving Events
+
+1. Verify webhook endpoint is configured in Stripe Dashboard
+2. For local development, use Stripe CLI:
+   ```bash
+   stripe listen --forward-to localhost:8000/api/v1/webhooks/stripe
+   ```
+3. Check webhook logs:
+   ```bash
+   docker compose logs app | grep webhook
+   ```
+
+## Production Deployment
+
+For production deployment:
+
+1. **Use production Stripe keys** (not test keys)
+2. **Change admin API key** to a strong, random value
+3. **Use managed PostgreSQL** (AWS RDS, Google Cloud SQL, etc.)
+4. **Use managed Redis** (AWS ElastiCache, Google Cloud Memorystore, etc.)
+5. **Enable HTTPS** (use reverse proxy like nginx or Traefik)
+6. **Set up monitoring** (Prometheus, Grafana, etc.)
+7. **Configure backups** for database
+8. **Use secrets management** (AWS Secrets Manager, HashiCorp Vault, etc.)
+9. **Set up log aggregation** (ELK stack, CloudWatch, etc.)
+10. **Configure webhook endpoint** in Stripe Dashboard to production URL
 
 ## Next Steps
 
-1. Set up Stripe webhook endpoint in Stripe Dashboard
-2. Configure production environment variables
-3. Set up monitoring and alerting
-4. Review security best practices
-5. Plan for scaling and high availability
+After setup:
 
-## Additional Resources
+1. Read [API Reference](api_reference.md) to understand available endpoints
+2. Review [Architecture](architecture.md) to understand system design
+3. Check [Operations Guide](operations.md) for operational procedures
+4. Create your first project and start integrating!
 
-- [Stripe API Documentation](https://stripe.com/docs/api)
-- [FastAPI Documentation](https://fastapi.tiangolo.com/)
-- [SQLAlchemy Documentation](https://docs.sqlalchemy.org/)
-- [Alembic Documentation](https://alembic.sqlalchemy.org/)
+## Getting Help
+
+- Check logs: `make logs`
+- Review documentation in `docs/` directory
+- Check Stripe Dashboard for payment-related issues
+- Review error messages in application logs
