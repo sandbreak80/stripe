@@ -10,9 +10,11 @@ services:
       - DATABASE_URL=postgresql://billing_user:billing_pass@postgres:5432/billing_db
       - REDIS_URL=redis://redis:6379/0
       - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-}
+      - STRIPE_PUBLISHABLE_KEY=${STRIPE_PUBLISHABLE_KEY:-}
       - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
       - ADMIN_API_KEY=${ADMIN_API_KEY:-}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - USE_REAL_STRIPE=${USE_REAL_STRIPE:-false}
     depends_on:
       postgres:
         condition: service_healthy
@@ -20,6 +22,7 @@ services:
         condition: service_healthy
     volumes:
       - ./src:/app/src
+      - ./tests:/app/tests
       - ./alembic:/app/alembic
       - ./artifacts:/app/artifacts
     networks:

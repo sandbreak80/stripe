@@ -128,6 +128,21 @@ class CheckoutSessionCompletedProcessor(BaseEventProcessor):
         status = status_map.get(stripe_status, SubscriptionStatus.ACTIVE)
 
         # Create subscription
+        # Handle canceled_at carefully - it can be None, int timestamp, or missing
+        canceled_at_attr = getattr(stripe_subscription, "canceled_at", None)
+        canceled_at_dt = None
+        if canceled_at_attr is not None:
+            # Only convert to datetime if canceled_at is a valid timestamp (int/float)
+            try:
+                canceled_at_dt = datetime.fromtimestamp(int(canceled_at_attr))
+            except (ValueError, TypeError, OSError):
+                # If conversion fails (None, invalid value, etc.), leave as None
+                canceled_at_dt = None
+        
+        # Handle cancel_at_period_end - ensure it's a boolean
+        cancel_at_period_end_attr = getattr(stripe_subscription, "cancel_at_period_end", False)
+        cancel_at_period_end = bool(cancel_at_period_end_attr) if cancel_at_period_end_attr is not None else False
+        
         subscription = Subscription(
             stripe_subscription_id=subscription_id,
             user_id=user_id,
@@ -136,8 +151,8 @@ class CheckoutSessionCompletedProcessor(BaseEventProcessor):
             status=status,
             current_period_start=datetime.fromtimestamp(getattr(stripe_subscription, "current_period_start", 0)),  # type: ignore[arg-type]
             current_period_end=datetime.fromtimestamp(getattr(stripe_subscription, "current_period_end", 0)),  # type: ignore[arg-type]
-            cancel_at_period_end=getattr(stripe_subscription, "cancel_at_period_end", False) or False,
-            canceled_at=datetime.fromtimestamp(getattr(stripe_subscription, "canceled_at", 0)) if getattr(stripe_subscription, "canceled_at", None) else None,  # type: ignore[arg-type]
+            cancel_at_period_end=cancel_at_period_end,
+            canceled_at=canceled_at_dt,
         )
 
         db.add(subscription)

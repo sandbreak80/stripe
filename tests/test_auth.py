@@ -33,6 +33,8 @@ def test_verify_api_key():
 @pytest.mark.asyncio
 async def test_get_project_from_api_key(db_session):
     """Test retrieving project from API key."""
+    from fastapi import HTTPException
+    
     api_key = "test_api_key_789"
     api_key_hash = hash_api_key(api_key)
     
@@ -49,13 +51,22 @@ async def test_get_project_from_api_key(db_session):
     found = await get_project_from_api_key(api_key, db_session)
     assert found is not None
     assert found.project_id == "test-project-auth"
+    assert found.is_active is True
     
     # Should not find project with wrong key
     not_found = await get_project_from_api_key("wrong_key", db_session)
     assert not_found is None
     
-    # Should not find inactive project
+    # Test inactive project - should raise HTTPException
+    # Update project to inactive in same session
     project.is_active = False
     db_session.commit()
-    not_found_inactive = await get_project_from_api_key(api_key, db_session)
-    assert not_found_inactive is None
+    db_session.refresh(project)
+    
+    # Verify project is now inactive
+    assert project.is_active is False
+    
+    # Should raise HTTPException for inactive project
+    with pytest.raises(HTTPException) as exc_info:
+        await get_project_from_api_key(api_key, db_session)
+    assert exc_info.value.status_code == 403

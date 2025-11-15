@@ -100,7 +100,22 @@ docker compose logs -f redis
 3. Copy your **Publishable key** (`pk_test_...`)
 4. Add them to your `.env` file
 
-### 2. Configure Webhooks
+### 2. Enable Test Mode Card Data (For Integration Tests)
+
+**Important**: If you plan to run integration tests that create payment methods, you need to enable "Test mode card data" in your Stripe Dashboard.
+
+1. Go to [Stripe Dashboard > Settings > Integrations](https://dashboard.stripe.com/test/settings/integrations)
+2. Scroll to **API settings**
+3. Enable **"Test mode card data"**
+4. Save changes
+
+**Why this is needed**: Integration tests that create PaymentMethods directly require this setting to use test card numbers.
+
+**Security Note**: This only affects test mode. Your live mode remains secure.
+
+**See also**: [STRIPE_TEST_MODE_SETUP.md](./STRIPE_TEST_MODE_SETUP.md) for detailed instructions and alternatives.
+
+### 3. Configure Webhooks
 
 1. Go to [Stripe Dashboard > Webhooks](https://dashboard.stripe.com/test/webhooks)
 2. Click "Add endpoint"

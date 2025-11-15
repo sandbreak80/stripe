@@ -119,6 +119,7 @@ addopts = [
 markers = [
     "unit: Unit tests",
     "integration: Integration tests",
+    "integration_stripe: Integration tests using real Stripe API",
     "slow: Slow running tests",
 ]
 

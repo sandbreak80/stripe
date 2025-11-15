@@ -34,6 +34,16 @@ typecheck:
 test:
 	docker compose exec -T app pytest tests/ -v --cov=src/billing_service --cov-report=html --cov-report=term --cov-report=json:artifacts/coverage.json
 
+test-stripe:
+	@echo "Running Stripe integration tests with real Stripe API (requires USE_REAL_STRIPE=true)"
+	@echo "All tests run inside Docker containers"
+	docker compose exec -T app pytest tests/test_stripe_integration.py -v -m integration_stripe
+
+test-all:
+	@echo "Running all tests including Stripe integration (requires USE_REAL_STRIPE=true)"
+	@echo "All tests run inside Docker containers"
+	docker compose exec -T app pytest tests/ -v --cov=src/billing_service --cov-report=html --cov-report=term --cov-report=json:artifacts/coverage.json
+
 migrate:
 	docker compose exec app alembic upgrade head
 

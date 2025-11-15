@@ -19,12 +19,21 @@ from billing_service.models import (
 
 def test_compute_entitlements_from_subscription(db_session, test_project, test_product, test_price):
     """Test computing entitlements from an active subscription."""
-    user_id = "user_123"
+    # Use unique IDs to ensure test isolation
+    unique_user_id = f"user_{uuid.uuid4().hex[:24]}"
+    unique_sub_id = f"sub_{uuid.uuid4().hex[:24]}"
+
+    # Clean up any existing entitlements for this user/project combination
+    db_session.query(Entitlement).filter(
+        Entitlement.user_id == unique_user_id,
+        Entitlement.project_id == test_project.id,
+    ).delete(synchronize_session=False)
+    db_session.commit()
 
     # Create subscription
     subscription = Subscription(
-        stripe_subscription_id="sub_test123",
-        user_id=user_id,
+        stripe_subscription_id=unique_sub_id,
+        user_id=unique_user_id,
         project_id=test_project.id,
         price_id=test_price.id,
         status=SubscriptionStatus.ACTIVE,
@@ -36,11 +45,11 @@ def test_compute_entitlements_from_subscription(db_session, test_project, test_p
     db_session.commit()
 
     # Compute entitlements
-    entitlements = compute_entitlements_for_user(db_session, user_id, test_project.id)
+    entitlements = compute_entitlements_for_user(db_session, unique_user_id, test_project.id)
 
     # Verify entitlements
     assert len(entitlements) == 2  # Two features
-    assert all(e.user_id == user_id for e in entitlements)
+    assert all(e.user_id == unique_user_id for e in entitlements)
     assert all(e.project_id == test_project.id for e in entitlements)
     assert all(e.source == EntitlementSource.SUBSCRIPTION for e in entitlements)
     assert all(e.is_active is True for e in entitlements)
